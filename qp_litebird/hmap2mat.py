@@ -16,14 +16,17 @@ A&A 598, A25 (2017)) to LiteBIRD inputs:
   * detector metadata (polarization angle, cross-polar efficiency) comes from
     ``litebird_sim.DetectorInfo``.
 
-The top-level entry point is :func:`hmap2mat`, which returns a
-:class:`BeamMatrixResult`.
+Inputs are bundled into a :class:`DetectorSet` (detectors, beams, h-map
+directory, weights, rho). The top-level entry point is :func:`hmap2mat`, which
+accepts one or two sets: with a single set it computes the auto beam matrix, and
+with a second set it reproduces QuickPol's ``detset1 x detset2`` cross treatment.
+It returns a :class:`BeamMatrixResult`.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import healpy as hp
@@ -38,6 +41,40 @@ from .utilities import (
     spherical_harmonics_to_blm_array,
     validate_pixel_undersampling,
 )
+
+# -----------------------------------------------------------------------------
+# Detector sets
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class DetectorSet:
+    """A LiteBIRD detector set and its per-set inputs.
+
+    Parameters
+    ----------
+    detectors : sequence of litebird_sim.DetectorInfo
+        Detectors in the set. All are assumed to be polarization-sensitive.
+    beams : mapping[str, litebird_sim.SphericalHarmonics]
+        Beam harmonic coefficients keyed by detector name. Each beam ``mmax``
+        must be at least ``smax + 2``.
+    h_maps_dir : str
+        Directory containing the ``h_maps_det_{name}.h5`` files.
+    weights : array or None
+        Per-detector weights (default: equal weights).
+    rho_beam : {"detector", "Ideal"} or array
+        Cross-polar efficiency for the beam: ``"detector"`` reads
+        ``detector.pol_efficiency``, ``"Ideal"`` uses 1, or pass an array.
+    rho_hit : {"detector", "Ideal"} or array
+        Cross-polar efficiency for the hit matrix (same options).
+    """
+
+    detectors: Sequence
+    beams: Mapping
+    h_maps_dir: str
+    weights: np.ndarray | None = None
+    rho_beam: str | np.ndarray = "Ideal"
+    rho_hit: str | np.ndarray = "Ideal"
 
 # -----------------------------------------------------------------------------
 # Small linear-algebra helpers
@@ -351,60 +388,93 @@ def make_hit_vectors(
 
 
 def make_hit_matrix(
-    detectors,
-    weights,
-    rho_hit,
+    set_1,
+    set_2,
     nside,
     smax,
-    h_maps_dir,
     pixel_undersampling=None,
     thr=None,
     conserve_memory=True,
 ):
-    """Compute the hit matrix (and associated variance-like terms)."""
+    """Compute the cross hit matrix between two detector sets.
+
+    ``set_2`` may be the same object as ``set_1`` (auto case); in that case the
+    per-pixel hit vectors are computed once and reused, exactly as QuickPol does
+    when ``detset1 == detset2``.
+    """
     pixel_undersampling = validate_pixel_undersampling(pixel_undersampling)
 
-    n_detectors = len(weights)
+    weights_1 = get_beam_weights(set_1.weights, len(set_1.detectors))
+    weights_2 = get_beam_weights(set_2.weights, len(set_2.detectors))
+    rho_hit_1 = get_beam_rho(set_1.detectors, set_1.rho_hit)
+    rho_hit_2 = get_beam_rho(set_2.detectors, set_2.rho_hit)
+
+    n_detectors_1 = len(weights_1)
+    n_detectors_2 = len(weights_2)
     npix = 12 * nside**2
 
     if conserve_memory:
-        nq = 12 if n_detectors <= 4 else 12 * 2
+        nq = 12 if max(n_detectors_1, n_detectors_2) <= 4 else 12 * 2
     else:
         nq = 1
     npq = npix // nq
 
     skip = 1 if pixel_undersampling is None else pixel_undersampling
+    same_set = set_2 is set_1
 
     hit_matrix = np.zeros(
-        (n_detectors, n_detectors, smax + 1, 3, 3), dtype=np.complex128
+        (n_detectors_1, n_detectors_2, smax + 1, 3, 3), dtype=np.complex128
     )
-    nbad = 0
+    nbad_1 = 0
+    nbad_2 = 0
     npt = 0
 
     for iq in range(nq):
         npt += npq
         pixels = [iq * npq, (iq + 1) * npq - 1, skip]
-        hit_vectors, nbad_chunk = make_hit_vectors(
-            detectors, weights, rho_hit, nside, smax, h_maps_dir, pixels, thr
+        hit_vectors_1, nbad_chunk_1 = make_hit_vectors(
+            set_1.detectors,
+            weights_1,
+            rho_hit_1,
+            nside,
+            smax,
+            set_1.h_maps_dir,
+            pixels,
+            thr,
         )
-        nbad += nbad_chunk
+        nbad_1 += nbad_chunk_1
+        if same_set:
+            hit_vectors_2 = hit_vectors_1
+            nbad_2 += nbad_chunk_1
+        else:
+            hit_vectors_2, nbad_chunk_2 = make_hit_vectors(
+                set_2.detectors,
+                weights_2,
+                rho_hit_2,
+                nside,
+                smax,
+                set_2.h_maps_dir,
+                pixels,
+                thr,
+            )
+            nbad_2 += nbad_chunk_2
 
         step = 1024 * 4
         for first in range(0, npq, step):
             last = min(first + step, npq)
-            for i1 in range(n_detectors):
-                for i2 in range(n_detectors):
+            for i1 in range(n_detectors_1):
+                for i2 in range(n_detectors_2):
                     for spin in range(smax + 1):
                         for u1 in range(3):
                             for u2 in range(3):
                                 # sum_p h1 . conj(h2)
                                 hit_matrix[i1, i2, spin, u1, u2] += np.vdot(
-                                    hit_vectors[i2, spin, u2, first:last],
-                                    hit_vectors[i1, spin, u1, first:last],
+                                    hit_vectors_2[i2, spin, u2, first:last],
+                                    hit_vectors_1[i1, spin, u1, first:last],
                                 )
 
     hit_matrix /= npt / skip  # divide by the number of (sampled) pixels
-    return hit_matrix, nbad, skip
+    return hit_matrix, nbad_1, nbad_2, skip
 
 
 # -----------------------------------------------------------------------------
@@ -506,6 +576,11 @@ class BeamMatrixResult:
     ``beam_mat`` maps each CMB type (``TT``, ``TE``, ``EE``, ``BB``, ``TB``,
     ``EB``) to a real array of shape ``(lmax + 1, 3, 3)``, i.e. the 3x3
     beam-mixing window at every multipole.
+
+    For a cross computation between two detector sets, ``hit_mat`` has shape
+    ``(n_det_1, n_det_2, smax + 1, 3, 3)`` and ``beam_mat`` is the effective
+    beam summed over the cross pairs ``(i1, i2)``. In the auto case
+    (``set_2 is set_1``) the two name lists and bad-pixel counts coincide.
     """
 
     beam_mat: Mapping[str, np.ndarray]
@@ -514,9 +589,11 @@ class BeamMatrixResult:
     lmax: int
     smax: int
     mmax: int
-    detector_names: list
+    detector_names_1: list
+    detector_names_2: list
     skip: int
-    nbad: int
+    nbad_1: int
+    nbad_2: int
 
 
 def infer_nside(h_maps_dir, detector_name):
@@ -530,50 +607,38 @@ def infer_nside(h_maps_dir, detector_name):
 
 
 def hmap2mat(
-    detectors,
-    beams,
-    h_maps_dir,
+    set_1,
+    set_2=None,
     *,
     smax=6,
     nside=None,
     lmax=None,
     mmax=None,
-    rho_beam="Ideal",
-    rho_hit="Ideal",
-    weights=None,
     pixel_undersampling=None,
     conserve_memory=True,
     angle_shift=0.0,
     lstep=1,
     savefile=None,
 ):
-    """Compute the QuickPol beam-mixing matrix for a LiteBIRD detector set.
+    """Compute the QuickPol beam-mixing matrix for LiteBIRD detector set(s).
 
     Parameters
     ----------
-    detectors : sequence of litebird_sim.DetectorInfo
-        Detectors of the set. All are assumed to be polarization-sensitive.
-    beams : dict[str, litebird_sim.SphericalHarmonics]
-        Beam harmonic coefficients keyed by detector name. The beam ``mmax``
-        must be at least ``smax + 2`` (the beam matrix needs ``m`` up to
-        ``spin + 2``).
-    h_maps_dir : str
-        Directory containing the ``h_maps_det_{name}.h5`` files.
+    set_1 : DetectorSet
+        First detector set (detectors, beams, h-map directory, weights, rho).
+    set_2 : DetectorSet or None
+        Optional second detector set. If ``None`` the auto case is computed
+        (``set_2 = set_1``). Otherwise the effective beam for the cross-spectra
+        between the two sets is returned.
     smax : int
         Maximum spin in the hit/moment expansion (default 6).
     nside : int or None
-        HEALPix resolution; if ``None`` it is inferred from the h-maps.
+        HEALPix resolution; if ``None`` it is inferred from ``set_1``'s h-maps
+        and checked against ``set_2``.
     lmax : int or None
         Maximum multipole; defaults to ``2 * nside``.
     mmax : int or None
         Maximum azimuthal index of the beams; defaults to ``smax + 2``.
-    rho_beam : {"detector", "Ideal"} or array
-        Cross-polar efficiency for the beam: ``"detector"`` reads
-        ``detector.pol_efficiency``, ``"Ideal"`` uses 1, or pass an array.
-    rho_hit : {"detector", "Ideal"} or array
-        Cross-polar efficiency for the hit matrix (same options).
-    weights : array or None
-        Per-detector weights (default: equal weights).
     pixel_undersampling : int or None
         Pixel skip factor (must be a power of 4), or ``None`` for no
         undersampling.
@@ -591,43 +656,68 @@ def hmap2mat(
     -------
     BeamMatrixResult
     """
-    if not detectors:
-        raise ValueError("No detectors provided.")
-    detector_names = [detector.name for detector in detectors]
+    if not set_1.detectors:
+        raise ValueError("set_1 has no detectors.")
+    if set_2 is None:
+        set_2 = set_1
+
+    names_1 = [detector.name for detector in set_1.detectors]
+    names_2 = [detector.name for detector in set_2.detectors]
 
     if nside is None:
-        nside = infer_nside(h_maps_dir, detector_names[0])
+        nside = infer_nside(set_1.h_maps_dir, names_1[0])
     if lmax is None:
         lmax = 2 * nside
     if mmax is None:
         mmax = smax + 2
 
+    if set_2 is not set_1:
+        nside_2 = infer_nside(set_2.h_maps_dir, names_2[0])
+        if nside_2 != nside:
+            raise ValueError(
+                f"set_2 h-maps nside ({nside_2}) does not match set_1 nside "
+                f"({nside}); a cross hit matrix requires a common resolution."
+            )
+
     thr = 3.0e-3
     ctypes = ["TT", "TE", "EE", "BB", "TB", "EB"]
 
-    weights = get_beam_weights(weights, len(detectors))
-    rho_beam = get_beam_rho(detectors, rho_beam)
-    rho_hit = get_beam_rho(detectors, rho_hit)
-    angles = get_beam_angles(detectors)
-
-    beam_dicts = fill_beam_dict(
-        detectors, beams, lmax, mmax, rho_beam, weights, angles, angle_shift
+    beam_dicts_1 = fill_beam_dict(
+        set_1.detectors,
+        set_1.beams,
+        lmax,
+        mmax,
+        get_beam_rho(set_1.detectors, set_1.rho_beam),
+        get_beam_weights(set_1.weights, len(set_1.detectors)),
+        get_beam_angles(set_1.detectors),
+        angle_shift,
     )
+    if set_2 is set_1:
+        beam_dicts_2 = beam_dicts_1
+    else:
+        beam_dicts_2 = fill_beam_dict(
+            set_2.detectors,
+            set_2.beams,
+            lmax,
+            mmax,
+            get_beam_rho(set_2.detectors, set_2.rho_beam),
+            get_beam_weights(set_2.weights, len(set_2.detectors)),
+            get_beam_angles(set_2.detectors),
+            angle_shift,
+        )
 
-    hit_matrix, nbad, skip = make_hit_matrix(
-        detectors,
-        weights,
-        rho_hit,
+    hit_matrix, nbad_1, nbad_2, skip = make_hit_matrix(
+        set_1,
+        set_2,
         nside,
         smax,
-        h_maps_dir,
         pixel_undersampling=pixel_undersampling,
         thr=thr,
         conserve_memory=conserve_memory,
     )
 
     beam_windows = compute_beam_matrices(
-        beam_dicts, beam_dicts, hit_matrix, lmax, smax, ctypes, lstep=lstep
+        beam_dicts_1, beam_dicts_2, hit_matrix, lmax, smax, ctypes, lstep=lstep
     )
     beam_mat = {
         ctype: beam_windows[index].real for index, ctype in enumerate(ctypes)
@@ -645,7 +735,10 @@ def hmap2mat(
             smax=smax,
             mmax=mmax,
             nside=nside,
-            detector_names=np.array(detector_names),
+            detector_names_1=np.array(names_1),
+            detector_names_2=np.array(names_2),
+            nbad_1=nbad_1,
+            nbad_2=nbad_2,
         )
 
     return BeamMatrixResult(
@@ -655,7 +748,9 @@ def hmap2mat(
         lmax=lmax,
         smax=smax,
         mmax=mmax,
-        detector_names=detector_names,
+        detector_names_1=names_1,
+        detector_names_2=names_2,
         skip=skip,
-        nbad=nbad,
+        nbad_1=nbad_1,
+        nbad_2=nbad_2,
     )

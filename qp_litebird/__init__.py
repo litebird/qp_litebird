@@ -11,16 +11,18 @@ effective 3x3 beam-mixing matrices (W_ell) plus the corresponding mixed power
 spectra, for comparison against SMARTIES map-level convolution.
 
 Public API:
-- ``hmap2mat()``      -> build the beam-mixing matrix from h-maps + beams
+- ``DetectorSet``     -> bundle of detectors + beams + h-map dir + weights/rho
+- ``hmap2mat()``      -> build the beam-mixing matrix from one or two sets
 - ``get_spectra()``   -> mixed power spectra from a beam-mixing matrix
 - ``BeamMatrixResult`` -> container returned by ``hmap2mat``
 """
 
-from .hmap2mat import BeamMatrixResult, hmap2mat
+from .hmap2mat import BeamMatrixResult, DetectorSet, hmap2mat
 from .spectra import get_mixed_spectrum, get_spectra
 
 __all__ = [
     "BeamMatrixResult",
+    "DetectorSet",
     "get_mixed_spectrum",
     "get_spectra",
     "hmap2mat",
