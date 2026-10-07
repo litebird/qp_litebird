@@ -1,0 +1,26 @@
+[project]
+name = "qp_litebird"
+version = "0.1.0"
+description = "QuickPol beam-mixing matrix computation for LiteBIRD"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy",
+    "scipy",
+    "healpy",
+    "astropy",
+    "ducc0",
+    "litebird-sim",
+    "h5py",
+]
+[dependency-groups]
+notebooks = [
+    "smarties[optional]",
+    "ipykernel",
+    "matplotlib",
+]
+
+[tool.uv.sources]
+litebird-sim = { path = "/home/camille/Documents/PhD/litebird_thingy/litebird_sim", editable = true }
+smarties = { git = "https://github.com/camilledemay/smarties-beam-convolution" }
+[tool.uv]
+no-binary-package = ["ducc0"]
