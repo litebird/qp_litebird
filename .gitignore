@@ -2,7 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+pyproject.dev.toml
 # C extensions
 *.so
 
@@ -222,3 +222,9 @@ __marimo__/
 
 # h-maps
 *.h5
+
+# qp_litebird notebook outputs
+ensemble_outputs/
+.test/
+notebooks/validate_ensemble.ipynb
+scripts/check_vs_qp_planck.py

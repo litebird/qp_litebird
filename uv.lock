@@ -1905,10 +1905,9 @@ wheels = [
 [[package]]
 name = "qp-litebird"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "astropy" },
-    { name = "ducc0" },
     { name = "h5py" },
     { name = "healpy" },
     { name = "litebird-sim" },
@@ -1918,15 +1917,16 @@ dependencies = [
 
 [package.dev-dependencies]
 notebooks = [
+    { name = "ducc0" },
     { name = "ipykernel" },
     { name = "matplotlib" },
+    { name = "qp-planck" },
     { name = "smarties", extra = ["optional"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "astropy" },
-    { name = "ducc0" },
     { name = "h5py" },
     { name = "healpy" },
     { name = "litebird-sim", editable = "/home/camille/Documents/PhD/litebird_thingy/litebird_sim" },
@@ -1936,10 +1936,33 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 notebooks = [
+    { name = "ducc0" },
     { name = "ipykernel" },
     { name = "matplotlib" },
+    { name = "qp-planck", editable = "/home/camille/Documents/PhD/litebird_thingy/qp_planck" },
     { name = "smarties", extras = ["optional"], git = "https://github.com/camilledemay/smarties-beam-convolution" },
 ]
+
+[[package]]
+name = "qp-planck"
+version = "0.1.0"
+source = { editable = "/home/camille/Documents/PhD/litebird_thingy/qp_planck" }
+dependencies = [
+    { name = "astropy" },
+    { name = "healpy" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "astropy", specifier = ">=5.0" },
+    { name = "healpy", specifier = ">=1.15" },
+    { name = "mpi4py", marker = "extra == 'mpi'", specifier = ">=3.0" },
+    { name = "numpy", specifier = ">=1.20" },
+    { name = "scipy", specifier = ">=1.6" },
+]
+provides-extras = ["mpi"]
 
 [[package]]
 name = "requests"
