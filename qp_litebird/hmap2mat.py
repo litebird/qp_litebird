@@ -62,9 +62,6 @@ class DetectorSet:
         Directory containing the ``h_maps_det_{name}.h5`` files.
     weights : array or None
         Per-detector weights (default: equal weights).
-    rho_beam : {"detector", "Ideal"} or array
-        Cross-polar efficiency for the beam: ``"detector"`` reads
-        ``detector.pol_efficiency``, ``"Ideal"`` uses 1, or pass an array.
     rho_hit : {"detector", "Ideal"} or array
         Cross-polar efficiency for the hit matrix (same options).
     """
@@ -73,8 +70,8 @@ class DetectorSet:
     beams: Mapping
     h_maps_dir: str
     weights: np.ndarray | None = None
-    rho_beam: str | np.ndarray = "Ideal"
     rho_hit: str | np.ndarray = "Ideal"
+
 
 # -----------------------------------------------------------------------------
 # Small linear-algebra helpers
@@ -120,18 +117,14 @@ def interpolate_matrix(beam_windows, lmax, sampled_ell):
 def build_beam_matrix(beam_dict, ell, spin, verbose=False):
     """Construct the beam matrix (Eq. E.4 in QuickPol) from a beam dict.
 
-    LiteBIRD beams are always polarized, so ``ndb == 3`` and the cross-polar
-    efficiency is already baked into the spin components (see
-    :func:`spherical_harmonics_to_blm_array`).
     """
     mmax = beam_dict["mmax"]
-    ndb = beam_dict["ndb"]
     sign = (-1.0) ** np.arange(mmax + 1)
     n = mmax
-    beam = np.zeros((2 * n + 1, ndb), dtype=np.complex128)
+    beam = np.zeros((2 * n + 1, 3), dtype=np.complex128)
     # m * (phi + phi0), identical for temperature and polarization
     phase_argument = np.arange(n + 1, dtype=np.float64)
-    phase_argument *= beam_dict["angle"] + beam_dict["angle_shift"]
+    phase_argument *= beam_dict["angle"]
     phase = np.cos(phase_argument) + 1j * np.sin(phase_argument)
 
     temperature = beam_dict["blm"][ell, 0 : n + 1, 0] * phase
@@ -161,20 +154,16 @@ def fill_beam_dict(
     beams,
     lmax,
     mmax,
-    rho_beam,
     weights,
     angles,
-    angle_shift_deg,
 ):
-    """Build the list of per-detector beam dictionaries consumed by the core."""
+    """Build the list of per-detector beam dictionaries."""
     beam_dicts = []
     for index, detector in enumerate(detectors):
         if detector.name not in beams:
-            raise KeyError(
-                f"No beam provided for detector {detector.name!r}"
-            )
+            raise KeyError(f"No beam provided for detector {detector.name!r}")
         beam_array = spherical_harmonics_to_blm_array(
-            beams[detector.name], lmax, mmax, rho=rho_beam[index]
+            beams[detector.name], lmax, mmax
         )
         beam_dicts.append(
             {
@@ -184,8 +173,6 @@ def fill_beam_dict(
                 "lmax": lmax,
                 "mmax": mmax,
                 "blm": beam_array,
-                "ndb": 3,
-                "angle_shift": np.radians(angle_shift_deg),
             }
         )
     return beam_dicts
@@ -210,10 +197,9 @@ def count_pixels(pixels):
 def load_spin_moments(h_maps_dir, detector_name, nside, smax, pixels):
     """Load the hit count and un-normalized spin moments of one detector.
 
-    The LiteBIRD h-map ``h_{s,0}`` is already divided by the number of hits
-    ``N_p``. QuickPol expects the *raw* moment ``sum exp(i s psi)``, so we
-    multiply back by ``N_p`` here (this is the one adaptation that allows the
-    hit-matrix core to stay unchanged).
+    The LiteBIRD h-map ``h_{s,0}`` is divided by the number of hits
+    ``N_p``. QuickPol uses ``sum exp(i s psi)``, so we
+    multiply back by ``N_p``
     """
     path = os.path.join(h_maps_dir, f"h_maps_det_{detector_name}.h5")
     result = load_h_maps_from_file(path)
@@ -298,90 +284,80 @@ def make_hit_vectors(
     pixels,
     thr,
 ):
-    """Build the inverse-hit-weighted spin vectors of every detector."""
+    """Build hit vectors and their inverse-weighted versions."""
     n_detectors = len(weights)
-    npq, _nhigh, _skip, _sample = count_pixels(pixels)
+    n_pixels_per_chunk, _nhigh, _skip, _sample = count_pixels(pixels)
 
-    hit = np.zeros(npq, dtype=np.float64)
-    hit_spin = np.zeros((npq, 3), dtype=np.complex128)
-    hit_vectors = np.zeros((n_detectors, smax + 1, npq), dtype=np.complex128)
+    hit = np.zeros(n_pixels_per_chunk, dtype=np.float64)
+    hit_spin = np.zeros((n_pixels_per_chunk, 3), dtype=np.complex128)
+    hit_vectors = np.zeros((n_detectors, smax + 1, n_pixels_per_chunk), dtype=np.complex128)
 
-    rho1_weight = rho_hit * weights
-    rho2_weight = rho_hit * rho1_weight
+    rho1_weight = rho_hit * weights  # rho * weight
+    rho2_weight = rho_hit * rho1_weight # rho**2 * weight
 
-    for index, detector in enumerate(detectors):
-        hit_vectors[index] = load_spin_moments(
+    for idx_det, detector in enumerate(detectors):
+        hit_vectors[idx_det] = load_spin_moments(
             h_maps_dir, detector.name, nside, smax, pixels
         )
-        hit += weights[index] * hit_vectors[index, 0].real
-        hit_spin[:, 0] += rho2_weight[index] * hit_vectors[index, 0]
-        hit_spin[:, 1] += rho1_weight[index] * hit_vectors[index, 2]
-        hit_spin[:, 2] += rho2_weight[index] * hit_vectors[index, 4]
+        hit += weights[idx_det] * hit_vectors[idx_det, 0].real
+        hit_spin[:, 0] += rho2_weight[idx_det] * hit_vectors[idx_det, 0] # T
+        hit_spin[:, 1] += rho1_weight[idx_det] * hit_vectors[idx_det, 2] # Q+iU
+        hit_spin[:, 2] += rho2_weight[idx_det] * hit_vectors[idx_det, 4] # Q-iU
 
     hit = np.maximum(hit, 1.0)  # put 1 in empty pixels
-    for spin in [0, 1, 2]:
-        hit_spin[:, spin] /= hit
+    for comp in [0, 1, 2]:
+        hit_spin[:, comp] /= hit
     inverse_hit, nbad = invert_hit_matrix(hit_spin, thr=thr)
     del hit_spin
 
-    for index in range(n_detectors):
+    for idx_det in range(n_detectors):
         for spin in range(smax + 1):
-            hit_vectors[index, spin] /= hit
+            hit_vectors[idx_det, spin] /= hit
     del hit
 
     filtered_hit_vectors = np.zeros(
-        (n_detectors, smax + 1, 3, npq), dtype=np.complex128
+        (n_detectors, smax + 1, 3, n_pixels_per_chunk), dtype=np.complex128
     )
     step = 1024 * 4
-    for index in range(n_detectors):
+    for idx_det in range(n_detectors):
         for spin in range(smax + 1):
-            for first in range(0, npq, step):
-                last = min(first + step, npq)
-                hs0 = hit_vectors[index, spin, first:last]
-                hsp2 = (
-                    hit_vectors[index, spin + 2, first:last]
-                    if spin <= smax - 2
-                    else 0
+            for first in range(0, n_pixels_per_chunk, step):
+                last = min(first + step, n_pixels_per_chunk)
+                h_spin_0 = hit_vectors[idx_det, spin, first:last]
+                h_spin_p2 = (
+                    hit_vectors[idx_det, spin + 2, first:last] if spin <= smax - 2 else 0
                 )
-                hsp4 = (
-                    hit_vectors[index, spin + 4, first:last]
-                    if spin <= smax - 4
-                    else 0
+                h_spin_p4 = (
+                    hit_vectors[idx_det, spin + 4, first:last] if spin <= smax - 4 else 0
                 )
-                hsm2 = (
-                    hit_vectors[index, spin - 2, first:last]
+                h_spin_m2 = (
+                    hit_vectors[idx_det, spin - 2, first:last]
                     if spin >= 2
-                    else np.conjugate(hit_vectors[index, abs(spin - 2), first:last])
+                    else np.conjugate(hit_vectors[idx_det, abs(spin - 2), first:last])
                 )
-                hsm4 = (
-                    hit_vectors[index, spin - 4, first:last]
+                h_spin_m4 = (
+                    hit_vectors[idx_det, spin - 4, first:last]
                     if spin >= 4
-                    else np.conjugate(hit_vectors[index, abs(spin - 4), first:last])
+                    else np.conjugate(hit_vectors[idx_det, abs(spin - 4), first:last])
                 )
 
-                filtered_hit_vectors[index, spin, 0, first:last] = (
-                    inverse_hit[first:last, 0, 0] * hs0
-                    + rho_hit[index]
-                    * (
-                        inverse_hit[first:last, 0, 1] * hsp2
-                        + inverse_hit[first:last, 0, 2] * hsm2
-                    )
+                filtered_hit_vectors[idx_det, spin, 0, first:last] = inverse_hit[
+                    first:last, 0, 0
+                ] * h_spin_0 + rho_hit[idx_det] * (
+                    inverse_hit[first:last, 0, 1] * h_spin_p2
+                    + inverse_hit[first:last, 0, 2] * h_spin_m2
                 )
-                filtered_hit_vectors[index, spin, 1, first:last] = (
-                    inverse_hit[first:last, 1, 0] * hsm2
-                    + rho_hit[index]
-                    * (
-                        inverse_hit[first:last, 1, 1] * hs0
-                        + inverse_hit[first:last, 1, 2] * hsm4
-                    )
+                filtered_hit_vectors[idx_det, spin, 1, first:last] = inverse_hit[
+                    first:last, 1, 0
+                ] * h_spin_m2 + rho_hit[idx_det] * (
+                    inverse_hit[first:last, 1, 1] * h_spin_0
+                    + inverse_hit[first:last, 1, 2] * h_spin_m4
                 )
-                filtered_hit_vectors[index, spin, 2, first:last] = (
-                    inverse_hit[first:last, 2, 0] * hsp2
-                    + rho_hit[index]
-                    * (
-                        inverse_hit[first:last, 2, 1] * hsp4
-                        + inverse_hit[first:last, 2, 2] * hs0
-                    )
+                filtered_hit_vectors[idx_det, spin, 2, first:last] = inverse_hit[
+                    first:last, 2, 0
+                ] * h_spin_p2 + rho_hit[idx_det] * (
+                    inverse_hit[first:last, 2, 1] * h_spin_p4
+                    + inverse_hit[first:last, 2, 2] * h_spin_0
                 )
     del hit_vectors
     return filtered_hit_vectors, nbad
@@ -398,9 +374,8 @@ def make_hit_matrix(
 ):
     """Compute the cross hit matrix between two detector sets.
 
-    ``set_2`` may be the same object as ``set_1`` (auto case); in that case the
-    per-pixel hit vectors are computed once and reused, exactly as QuickPol does
-    when ``detset1 == detset2``.
+    ``set_2`` may be the same object as ``set_1``, in that case the
+    per-pixel hit vectors are computed once and reused
     """
     pixel_undersampling = validate_pixel_undersampling(pixel_undersampling)
 
@@ -414,10 +389,10 @@ def make_hit_matrix(
     npix = 12 * nside**2
 
     if conserve_memory:
-        nq = 12 if max(n_detectors_1, n_detectors_2) <= 4 else 12 * 2
+        number_of_chunks = 12 if max(n_detectors_1, n_detectors_2) <= 4 else 12 * 2
     else:
-        nq = 1
-    npq = npix // nq
+        number_of_chunks = 1
+    n_pixel_per_chunk = npix // number_of_chunks
 
     skip = 1 if pixel_undersampling is None else pixel_undersampling
     same_set = set_2 is set_1
@@ -427,11 +402,11 @@ def make_hit_matrix(
     )
     nbad_1 = 0
     nbad_2 = 0
-    npt = 0
+    pixel_start_chunk = 0
 
-    for iq in range(nq):
-        npt += npq
-        pixels = [iq * npq, (iq + 1) * npq - 1, skip]
+    for idx_chunk in range(number_of_chunks):
+        pixel_start_chunk += n_pixel_per_chunk
+        pixels = [idx_chunk * n_pixel_per_chunk, (idx_chunk + 1) * n_pixel_per_chunk - 1, skip]
         hit_vectors_1, nbad_chunk_1 = make_hit_vectors(
             set_1.detectors,
             weights_1,
@@ -460,8 +435,8 @@ def make_hit_matrix(
             nbad_2 += nbad_chunk_2
 
         step = 1024 * 4
-        for first in range(0, npq, step):
-            last = min(first + step, npq)
+        for first in range(0, n_pixel_per_chunk, step):
+            last = min(first + step, n_pixel_per_chunk)
             for i1 in range(n_detectors_1):
                 for i2 in range(n_detectors_2):
                     for spin in range(smax + 1):
@@ -473,7 +448,7 @@ def make_hit_matrix(
                                     hit_vectors_1[i1, spin, u1, first:last],
                                 )
 
-    hit_matrix /= npt / skip  # divide by the number of (sampled) pixels
+    hit_matrix /= pixel_start_chunk / skip  # divide by the number of (sampled) pixels
     return hit_matrix, nbad_1, nbad_2, skip
 
 
@@ -495,7 +470,7 @@ def compute_beam_matrices(
     diag = np.array([[1, 0, 0], [0, 0.5, 0], [0, 0, 0.5]])
     idiag = np.array([[1, 0, 0], [0, 2.0, 0], [0, 0, 2.0]])
 
-    # To be consistent with CMBFAST and Healpix on TE and TB
+    # To be consistent with Healpix on TE and TB
     rot = np.array([[1, 0, 0], [0, -1, -1j], [0, -1, 1j]])
     adjoint_rot = adjoint(rot)
     inverse_rot = np.linalg.inv(rot)
@@ -518,12 +493,8 @@ def compute_beam_matrices(
     n_detectors_2 = len(beam_dicts_2)
     n_ell = len(sampled_ell)
 
-    beams_1 = np.zeros(
-        (2 * smax + 1, n_detectors_1, n_ell, 3, 3), dtype=np.complex128
-    )
-    beams_2 = np.zeros(
-        (2 * smax + 1, n_detectors_2, n_ell, 3, 3), dtype=np.complex128
-    )
+    beams_1 = np.zeros((2 * smax + 1, n_detectors_1, n_ell, 3, 3), dtype=np.complex128)
+    beams_2 = np.zeros((2 * smax + 1, n_detectors_2, n_ell, 3, 3), dtype=np.complex128)
     for i1 in range(n_detectors_1):
         for spin in np.arange(-smax, smax + 1):
             for ell in sampled_ell:
@@ -616,7 +587,6 @@ def hmap2mat(
     mmax=None,
     pixel_undersampling=None,
     conserve_memory=True,
-    angle_shift=0.0,
     lstep=1,
     savefile=None,
 ):
@@ -644,8 +614,6 @@ def hmap2mat(
         undersampling.
     conserve_memory : bool
         Chunk the pixel loop to reduce peak memory.
-    angle_shift : float
-        Additional polarization rotation in degrees.
     lstep : int
         Multipole stride used to sample the beam matrices; cubic interpolation
         recovers the intermediate ell when ``lstep > 1``.
@@ -687,10 +655,8 @@ def hmap2mat(
         set_1.beams,
         lmax,
         mmax,
-        get_beam_rho(set_1.detectors, set_1.rho_beam),
         get_beam_weights(set_1.weights, len(set_1.detectors)),
         get_beam_angles(set_1.detectors),
-        angle_shift,
     )
     if set_2 is set_1:
         beam_dicts_2 = beam_dicts_1
@@ -700,10 +666,8 @@ def hmap2mat(
             set_2.beams,
             lmax,
             mmax,
-            get_beam_rho(set_2.detectors, set_2.rho_beam),
             get_beam_weights(set_2.weights, len(set_2.detectors)),
             get_beam_angles(set_2.detectors),
-            angle_shift,
         )
 
     hit_matrix, nbad_1, nbad_2, skip = make_hit_matrix(
@@ -719,9 +683,7 @@ def hmap2mat(
     beam_windows = compute_beam_matrices(
         beam_dicts_1, beam_dicts_2, hit_matrix, lmax, smax, ctypes, lstep=lstep
     )
-    beam_mat = {
-        ctype: beam_windows[index].real for index, ctype in enumerate(ctypes)
-    }
+    beam_mat = {ctype: beam_windows[index].real for index, ctype in enumerate(ctypes)}
 
     if savefile is not None:
         directory = os.path.dirname(savefile)

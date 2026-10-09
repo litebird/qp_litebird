@@ -79,7 +79,7 @@ def get_beam_rho(detectors, rho_option):
     return rho
 
 
-def spherical_harmonics_to_blm_array(beam, lmax, mmax, rho=1.0):
+def spherical_harmonics_to_blm_array(beam, lmax, mmax):
     """Convert a ``SphericalHarmonics`` beam to the QuickPol blm array.
 
     Parameters
@@ -121,8 +121,8 @@ def spherical_harmonics_to_blm_array(beam, lmax, mmax, rho=1.0):
             e_mode = values[1, idx]
             b_mode = values[2, idx]
             ret[l, m, 0] = temperature
-            ret[l, m, 1] = -(e_mode + 1j * b_mode) * rho
-            ret[l, m, 2] = -(e_mode - 1j * b_mode) * rho
+            ret[l, m, 1] = -(e_mode + 1j * b_mode)
+            ret[l, m, 2] = -(e_mode - 1j * b_mode)
 
     # "balm" renormalization: divide by b_00 and by sqrt(2l + 1).
     normalization = ret[0, 0, 0]

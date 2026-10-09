@@ -11,6 +11,7 @@ dependencies = [
     "astropy",
     "litebird-sim",
     "h5py",
+    "ty"
 ]
 [dependency-groups]
 notebooks = [
