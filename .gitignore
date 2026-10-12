@@ -226,5 +226,13 @@ __marimo__/
 # qp_litebird notebook outputs
 ensemble_outputs/
 .test/
+.test_postkdp2_option1/
 notebooks/validate_ensemble.ipynb
 scripts/check_vs_qp_planck.py
+tests/
+notebooks/example_hmaps_smoothing.ipynb
+notebooks/example_postkdp2_option1.ipynb
+scripts/sweep_ellipse_planck.py
+.gitignore
+.gitignore
+scripts/synth_smoothness_test.py

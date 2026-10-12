@@ -83,14 +83,6 @@ def adjoint(matrix):
     return np.transpose(np.conjugate(matrix))
 
 
-def matrix_product(*matrices):
-    """Chain matrix multiplications."""
-    result = matrices[0]
-    for matrix in matrices[1:]:
-        result = np.dot(result, matrix)
-    return result
-
-
 def interpolate_matrix(beam_windows, lmax, sampled_ell):
     """Interpolate a matrix in ell using cubic interpolation."""
     n1 = beam_windows.shape[1]
@@ -483,7 +475,7 @@ def compute_beam_matrices(
     cpp = np.zeros((n_ctypes, 3, 3), dtype=np.complex128)
     for index, ctype in enumerate(ctypes):
         mcl = (mcl_in == ctype) * 1.0
-        cpp[index] = matrix_product(rot, mcl, adjoint_rot)
+        cpp[index] = rot @  mcl @ adjoint_rot
 
     cout = np.zeros((n_ctypes, lmax + 1, 3, 3), dtype=np.complex128)
     sampled_ell = np.arange(0, lmax + 1, lstep)
@@ -513,19 +505,19 @@ def compute_beam_matrices(
             for i2 in range(n_detectors_2):
                 hit_mat = hit_matrix[i1, i2, abs(spin)]
                 if spin < 0:
-                    hit_mat = matrix_product(swap12, hit_mat.conjugate(), swap12)
+                    hit_mat = swap12 @ hit_mat.conjugate() @ swap12
 
                 for ell in sampled_ell:
                     beam_1 = beams_1[spin + smax, i1, ell // lstep]
                     beam_2 = beams_2[spin + smax, i2, ell // lstep]
                     adjoint_beam_1 = adjoint(beam_1)
 
-                    m1 = matrix_product(idiag, adjoint_beam_1, diag)
-                    m2 = matrix_product(diag, beam_2, idiag)
+                    m1 = idiag @ adjoint_beam_1 @ diag
+                    m2 = diag @ beam_2 @ idiag
                     for index in range(n_ctypes):
-                        m = matrix_product(m1, cpp[index], m2)
+                        m = m1 @ cpp[index] @ m2
                         mh = m * hit_mat
-                        mf = matrix_product(inverse_rot, mh, adjoint_inverse_rot)
+                        mf = inverse_rot @ mh @ adjoint_inverse_rot
                         cout[index, ell] += mf
 
     if lstep > 1:
