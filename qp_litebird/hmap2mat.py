@@ -24,6 +24,7 @@ It returns a :class:`BeamMatrixResult`.
 """
 
 from __future__ import annotations
+from typing import Type
 
 import os
 from collections.abc import Mapping, Sequence
@@ -73,6 +74,36 @@ class DetectorSet:
     rho_hit: str | np.ndarray = "Ideal"
 
 
+def _validate_pixel_undersampling(pixel_undersampling):
+    """
+    Validate pixel_undersampling value.
+
+    Must be None or a positive integer power of 4 (4**k, k >= 0).
+    Returns normalized integer value or None.
+    """
+    if pixel_undersampling is None:
+        return None
+
+    # Handle numpy integer scalars
+    if isinstance(pixel_undersampling, np.generic):
+        pixel_undersampling = int(pixel_undersampling)
+
+    if not isinstance(pixel_undersampling, int):
+        raise TypeError("pixel_undersampling must be None or an integer power of 4 (e.g. 1, 4, 16, 64, ...).")
+    if pixel_undersampling < 1:
+        raise ValueError("pixel_undersampling must be >= 1.")
+
+    p = pixel_undersampling
+    while p % 4 == 0:
+        p //= 4
+    if p != 1:
+        raise ValueError(
+            "pixel_undersampling must be a power of 4 (1, 4, 16, 64, ...)."
+        )
+
+    return pixel_undersampling
+
+
 # -----------------------------------------------------------------------------
 # Small linear-algebra helpers
 # -----------------------------------------------------------------------------
@@ -107,9 +138,7 @@ def interpolate_matrix(beam_windows, lmax, sampled_ell):
 
 
 def build_beam_matrix(beam_dict, ell, spin, verbose=False):
-    """Construct the beam matrix (Eq. E.4 in QuickPol) from a beam dict.
-
-    """
+    """Construct the beam matrix (Eq. E.4 in QuickPol) from a beam dict."""
     mmax = beam_dict["mmax"]
     sign = (-1.0) ** np.arange(mmax + 1)
     n = mmax
@@ -154,9 +183,7 @@ def fill_beam_dict(
     for index, detector in enumerate(detectors):
         if detector.name not in beams:
             raise KeyError(f"No beam provided for detector {detector.name!r}")
-        beam_array = spherical_harmonics_to_blm_array(
-            beams[detector.name], lmax, mmax
-        )
+        beam_array = spherical_harmonics_to_blm_array(beams[detector.name], lmax, mmax)
         beam_dicts.append(
             {
                 "det": detector.name,
@@ -282,19 +309,21 @@ def make_hit_vectors(
 
     hit = np.zeros(n_pixels_per_chunk, dtype=np.float64)
     hit_spin = np.zeros((n_pixels_per_chunk, 3), dtype=np.complex128)
-    hit_vectors = np.zeros((n_detectors, smax + 1, n_pixels_per_chunk), dtype=np.complex128)
+    hit_vectors = np.zeros(
+        (n_detectors, smax + 1, n_pixels_per_chunk), dtype=np.complex128
+    )
 
     rho1_weight = rho_hit * weights  # rho * weight
-    rho2_weight = rho_hit * rho1_weight # rho**2 * weight
+    rho2_weight = rho_hit * rho1_weight  # rho**2 * weight
 
     for idx_det, detector in enumerate(detectors):
         hit_vectors[idx_det] = load_spin_moments(
             h_maps_dir, detector.name, nside, smax, pixels
         )
         hit += weights[idx_det] * hit_vectors[idx_det, 0].real
-        hit_spin[:, 0] += rho2_weight[idx_det] * hit_vectors[idx_det, 0] # T
-        hit_spin[:, 1] += rho1_weight[idx_det] * hit_vectors[idx_det, 2] # Q+iU
-        hit_spin[:, 2] += rho2_weight[idx_det] * hit_vectors[idx_det, 4] # Q-iU
+        hit_spin[:, 0] += rho2_weight[idx_det] * hit_vectors[idx_det, 0]  # T
+        hit_spin[:, 1] += rho1_weight[idx_det] * hit_vectors[idx_det, 2]  # Q+iU
+        hit_spin[:, 2] += rho2_weight[idx_det] * hit_vectors[idx_det, 4]  # Q-iU
 
     hit = np.maximum(hit, 1.0)  # put 1 in empty pixels
     for comp in [0, 1, 2]:
@@ -317,10 +346,14 @@ def make_hit_vectors(
                 last = min(first + step, n_pixels_per_chunk)
                 h_spin_0 = hit_vectors[idx_det, spin, first:last]
                 h_spin_p2 = (
-                    hit_vectors[idx_det, spin + 2, first:last] if spin <= smax - 2 else 0
+                    hit_vectors[idx_det, spin + 2, first:last]
+                    if spin <= smax - 2
+                    else 0
                 )
                 h_spin_p4 = (
-                    hit_vectors[idx_det, spin + 4, first:last] if spin <= smax - 4 else 0
+                    hit_vectors[idx_det, spin + 4, first:last]
+                    if spin <= smax - 4
+                    else 0
                 )
                 h_spin_m2 = (
                     hit_vectors[idx_det, spin - 2, first:last]
@@ -398,7 +431,11 @@ def make_hit_matrix(
 
     for idx_chunk in range(number_of_chunks):
         pixel_start_chunk += n_pixel_per_chunk
-        pixels = [idx_chunk * n_pixel_per_chunk, (idx_chunk + 1) * n_pixel_per_chunk - 1, skip]
+        pixels = [
+            idx_chunk * n_pixel_per_chunk,
+            (idx_chunk + 1) * n_pixel_per_chunk - 1,
+            skip,
+        ]
         hit_vectors_1, nbad_chunk_1 = make_hit_vectors(
             set_1.detectors,
             weights_1,
@@ -475,7 +512,7 @@ def compute_beam_matrices(
     cpp = np.zeros((n_ctypes, 3, 3), dtype=np.complex128)
     for index, ctype in enumerate(ctypes):
         mcl = (mcl_in == ctype) * 1.0
-        cpp[index] = rot @  mcl @ adjoint_rot
+        cpp[index] = rot @ mcl @ adjoint_rot
 
     cout = np.zeros((n_ctypes, lmax + 1, 3, 3), dtype=np.complex128)
     sampled_ell = np.arange(0, lmax + 1, lstep)
@@ -616,6 +653,8 @@ def hmap2mat(
     -------
     BeamMatrixResult
     """
+
+    pixel_undersampling = _validate_pixel_undersampling(pixel_undersampling)
     if not set_1.detectors:
         raise ValueError("set_1 has no detectors.")
     if set_2 is None:
