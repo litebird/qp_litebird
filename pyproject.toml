@@ -11,19 +11,20 @@ dependencies = [
     "astropy",
     "litebird-sim",
     "h5py",
-    "ty"
+    "ty",
 ]
 [dependency-groups]
 notebooks = [
     "smarties[optional]",
     "ipykernel",
+    "jupyterlab",
     "matplotlib",
     "ducc0",
 ]
 
 [tool.uv.sources]
 litebird-sim = { git = "https://github.com/litebird/litebird_sim" }
-smarties = { git = "https://github.com/camilledemay/smarties-beam-convolution" }
+smarties = { git = "https://github.com/simonsobs/smarties" }
 
 [build-system]
 requires = ["hatchling"]
