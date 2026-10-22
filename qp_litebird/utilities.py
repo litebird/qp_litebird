@@ -31,54 +31,6 @@ import healpy as hp
 import numpy as np
 
 
-def get_beam_angles(detectors):
-    """Return the polarization angle (radians) of every detector.
-
-    LiteBIRD h-maps and beams are both defined in the Dxx frame, so the
-    polarization angle is used directly (there is no ``psi_uv + psi_pol``
-    split as in Planck).
-    """
-    return np.array([detector.pol_angle_rad for detector in detectors])
-
-
-def get_beam_weights(weights, n_detectors):
-    """Resolve the detector weights array, defaulting to equal weights."""
-    if weights is None:
-        return np.ones(n_detectors, dtype=np.float64)
-    weights = np.asarray(weights, dtype=np.float64)
-    if weights.ndim != 1 or weights.size != n_detectors:
-        raise ValueError(
-            f"weights must be a 1D array of size {n_detectors}, "
-            f"got shape {weights.shape}"
-        )
-    return weights
-
-
-def get_beam_rho(detectors, rho_option):
-    """Resolve the cross-polar efficiency ``rho`` for every detector.
-
-    ``rho_option`` accepts:
-      * ``"detector"`` -> read ``detector.pol_efficiency`` (the IMO value),
-      * ``"Ideal"``     -> ``rho = 1`` for every detector,
-      * an array        -> use it verbatim (must match ``len(detectors)``).
-    """
-    if isinstance(rho_option, str):
-        if rho_option == "detector":
-            rho = np.array([detector.pol_efficiency for detector in detectors])
-        elif rho_option == "Ideal":
-            rho = np.ones(len(detectors), dtype=np.float64)
-        else:
-            raise ValueError(f"Unknown rho option: {rho_option!r}")
-    else:
-        rho = np.asarray(rho_option, dtype=np.float64)
-        if rho.ndim != 1 or rho.size != len(detectors):
-            raise ValueError(
-                f"rho must be a 1D array of size {len(detectors)}, "
-                f"got shape {rho.shape}"
-            )
-    return rho
-
-
 def spherical_harmonics_to_blm_array(beam, lmax, mmax):
     """Convert a ``SphericalHarmonics`` beam to the QuickPol blm array.
 

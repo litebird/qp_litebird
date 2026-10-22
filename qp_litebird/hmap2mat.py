@@ -24,21 +24,18 @@ It returns a :class:`BeamMatrixResult`.
 """
 
 from __future__ import annotations
-from typing import Type
 
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import healpy as hp
+import litebird_sim as lbs
 import numpy as np
 import scipy.interpolate as inter
 from litebird_sim.mapmaking.h_maps import load_h_maps_from_file
 
 from .utilities import (
-    get_beam_angles,
-    get_beam_rho,
-    get_beam_weights,
     spherical_harmonics_to_blm_array,
     validate_pixel_undersampling,
 )
@@ -61,47 +58,44 @@ class DetectorSet:
         must be at least ``smax + 2``.
     h_maps_dir : str
         Directory containing the ``h_maps_det_{name}.h5`` files.
-    weights : array or None
-        Per-detector weights (default: equal weights).
-    rho_hit : {"detector", "Ideal"} or array
-        Cross-polar efficiency for the hit matrix (same options).
+    weights : {"imo", "equal"} or array
+        Per-detector weights (default: equal).
+    rho_hit : {"imo", "ideal"} or array
+        Cross-polar efficiency for the hit matrix (default: ideal).
     """
 
-    detectors: Sequence
-    beams: Mapping
+    detectors: Sequence[lbs.DetectorInfo]
+    beams: Mapping[str, lbs.SphericalHarmonics]
     h_maps_dir: str
-    weights: np.ndarray | None = None
-    rho_hit: str | np.ndarray = "Ideal"
+    weights: np.ndarray | str = "imo"
+    rho_hit: np.ndarray | str = "ideal"
 
+    def __post_init__(self):
+        if isinstance(self.weights, str):
+            if self.weights == "imo":
+                self.weights = np.array(
+                    [1 / (det.net_ukrts) ** 2 for det in self.detectors]
+                )
+            elif self.weights == "equal":
+                self.weights = np.ones(len(self.detectors))
+            else:
+                raise ValueError(
+                    f"weights must be 'imo', 'equal', or an array; got {self.weights!r}"
+                )
+        if isinstance(self.rho_hit, str):
+            if self.rho_hit == "imo":
+                self.rho_hit = np.array([det.pol_efficiency for det in self.detectors])
+            elif self.rho_hit == "ideal":
+                self.rho_hit = np.ones(len(self.detectors))
+            else:
+                raise ValueError(
+                    f"rho_hit must be 'imo', 'ideal', or an array; got {self.rho_hit!r}"
+                )
 
-def _validate_pixel_undersampling(pixel_undersampling):
-    """
-    Validate pixel_undersampling value.
-
-    Must be None or a positive integer power of 4 (4**k, k >= 0).
-    Returns normalized integer value or None.
-    """
-    if pixel_undersampling is None:
-        return None
-
-    # Handle numpy integer scalars
-    if isinstance(pixel_undersampling, np.generic):
-        pixel_undersampling = int(pixel_undersampling)
-
-    if not isinstance(pixel_undersampling, int):
-        raise TypeError("pixel_undersampling must be None or an integer power of 4 (e.g. 1, 4, 16, 64, ...).")
-    if pixel_undersampling < 1:
-        raise ValueError("pixel_undersampling must be >= 1.")
-
-    p = pixel_undersampling
-    while p % 4 == 0:
-        p //= 4
-    if p != 1:
-        raise ValueError(
-            "pixel_undersampling must be a power of 4 (1, 4, 16, 64, ...)."
+        assert len(self.detectors) == (self.weights).size == (self.rho_hit).size, (
+            "detectors, weights, and rho_hit must have the same length."
         )
-
-    return pixel_undersampling
+        assert self.weights.ndim==self.rho_hit.ndim==1, "weights and rho_hit must be 1D arrays."
 
 
 # -----------------------------------------------------------------------------
@@ -176,7 +170,6 @@ def fill_beam_dict(
     lmax,
     mmax,
     weights,
-    angles,
 ):
     """Build the list of per-detector beam dictionaries."""
     beam_dicts = []
@@ -187,7 +180,7 @@ def fill_beam_dict(
         beam_dicts.append(
             {
                 "det": detector.name,
-                "angle": angles[index],
+                "angle": detector.pol_angle_rad,
                 "weight": weights[index],
                 "lmax": lmax,
                 "mmax": mmax,
@@ -404,10 +397,10 @@ def make_hit_matrix(
     """
     pixel_undersampling = validate_pixel_undersampling(pixel_undersampling)
 
-    weights_1 = get_beam_weights(set_1.weights, len(set_1.detectors))
-    weights_2 = get_beam_weights(set_2.weights, len(set_2.detectors))
-    rho_hit_1 = get_beam_rho(set_1.detectors, set_1.rho_hit)
-    rho_hit_2 = get_beam_rho(set_2.detectors, set_2.rho_hit)
+    weights_1 = set_1.weights
+    weights_2 = set_2.weights
+    rho_hit_1 = set_1.rho_hit
+    rho_hit_2 = set_2.rho_hit
 
     n_detectors_1 = len(weights_1)
     n_detectors_2 = len(weights_2)
@@ -654,7 +647,6 @@ def hmap2mat(
     BeamMatrixResult
     """
 
-    pixel_undersampling = _validate_pixel_undersampling(pixel_undersampling)
     if not set_1.detectors:
         raise ValueError("set_1 has no detectors.")
     if set_2 is None:
@@ -686,8 +678,7 @@ def hmap2mat(
         set_1.beams,
         lmax,
         mmax,
-        get_beam_weights(set_1.weights, len(set_1.detectors)),
-        get_beam_angles(set_1.detectors),
+        set_1.weights,
     )
     if set_2 is set_1:
         beam_dicts_2 = beam_dicts_1
@@ -697,8 +688,7 @@ def hmap2mat(
             set_2.beams,
             lmax,
             mmax,
-            get_beam_weights(set_2.weights, len(set_2.detectors)),
-            get_beam_angles(set_2.detectors),
+            set_2.weights,
         )
 
     hit_matrix, nbad_1, nbad_2, skip = make_hit_matrix(
