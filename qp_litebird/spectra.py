@@ -13,7 +13,7 @@ import numpy as np
 
 _SPECTRUM_COMPONENTS = ["TT", "EE", "BB", "TE", "EB", "TB"]
 
-# healpy's 6-spectrum alm2cl ordering.
+# healpy's 6-spectrum anafast ordering.
 _COMPONENT_TO_CL_INDEX = {
     "TT": 0,
     "EE": 1,

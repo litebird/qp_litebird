@@ -23,11 +23,11 @@ with a second set it reproduces QuickPol's ``detset1 x detset2`` cross treatment
 It returns a :class:`BeamMatrixResult`.
 """
 
-from __future__ import annotations
-
+import logging
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import healpy as hp
 import litebird_sim as lbs
@@ -39,6 +39,8 @@ from .utilities import (
     spherical_harmonics_to_blm_array,
     validate_pixel_undersampling,
 )
+
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Detector sets
@@ -58,34 +60,46 @@ class DetectorSet:
         must be at least ``smax + 2``.
     h_maps_dir : str
         Directory containing the ``h_maps_det_{name}.h5`` files.
+    nside : int or None
+        Optional nside of the h-maps. If None, it is inferred from the first detector's h-maps.
     weights : {"imo", "equal"} or array
         Per-detector weights (default: equal).
     rho_hit : {"imo", "ideal"} or array
-        Cross-polar efficiency for the hit matrix (default: ideal).
+        Polarisation efficiency assumed by the hit matrix (default: ideal).
+    path_mask_T : str or Path or None
+        Optional path to a temperature mask. The mask solely affects which pixels are taken in consideration to build the hit matrix, it doesn't model the cut-sky mode coupling.
+    path_mask_P : str or Path or None
+        Optional path to a polarization mask. The mask solely affects which pixels are taken in consideration to build the hit matrix, it doesn't model the cut-sky mode coupling. If only one mask is provided, it will be used for both temperature and polarization.
     """
 
     detectors: Sequence[lbs.DetectorInfo]
     beams: Mapping[str, lbs.SphericalHarmonics]
-    h_maps_dir: str
-    weights: np.ndarray | str = "imo"
+    h_maps_dir: str | Path
+    nside: int | None = None
+    weights: np.ndarray | str = "equal"
     rho_hit: np.ndarray | str = "ideal"
+    path_mask_T: str | Path | None = None
+    path_mask_P: str | Path | None = None
+
+    mask_T: np.ndarray | None = field(init=False, default=None)
+    mask_P: np.ndarray | None = field(init=False, default=None)
 
     def __post_init__(self):
         if isinstance(self.weights, str):
-            if self.weights == "imo":
+            if (self.weights).lower() == "imo":
                 self.weights = np.array(
                     [1 / (det.net_ukrts) ** 2 for det in self.detectors]
                 )
-            elif self.weights == "equal":
+            elif (self.weights).lower() == "equal":
                 self.weights = np.ones(len(self.detectors))
             else:
                 raise ValueError(
                     f"weights must be 'imo', 'equal', or an array; got {self.weights!r}"
                 )
         if isinstance(self.rho_hit, str):
-            if self.rho_hit == "imo":
+            if (self.rho_hit).lower() == "imo":
                 self.rho_hit = np.array([det.pol_efficiency for det in self.detectors])
-            elif self.rho_hit == "ideal":
+            elif (self.rho_hit).lower() == "ideal":
                 self.rho_hit = np.ones(len(self.detectors))
             else:
                 raise ValueError(
@@ -95,7 +109,58 @@ class DetectorSet:
         assert len(self.detectors) == (self.weights).size == (self.rho_hit).size, (
             "detectors, weights, and rho_hit must have the same length."
         )
-        assert self.weights.ndim==self.rho_hit.ndim==1, "weights and rho_hit must be 1D arrays."
+        assert self.weights.ndim == self.rho_hit.ndim == 1, (
+            "weights and rho_hit must be 1D arrays."
+        )
+        if self.path_mask_P is not None:
+            self.path_mask_P = Path(self.path_mask_P)
+        if self.path_mask_T is not None:
+            self.path_mask_T = Path(self.path_mask_T)
+
+        self.h_maps_dir = Path(self.h_maps_dir)
+
+        assert self.h_maps_dir.is_dir(), (
+            f"h_maps_dir {self.h_maps_dir} is not a directory."
+        )
+        assert self.path_mask_T is None or self.path_mask_T.is_file(), (
+            f"Temperature mask {self.path_mask_T} is not a file."
+        )
+        assert self.path_mask_P is None or self.path_mask_P.is_file(), (
+            f"Polarization mask {self.path_mask_P} is not a file."
+        )
+
+        if self.nside is None:
+            self.nside = infer_nside(self.h_maps_dir, self.detectors[0].name)
+
+    def load_masks(self):
+        """Load the temperature and polarization masks, if provided."""
+        mask_T = None
+        mask_P = None
+        match (self.path_mask_T, self.path_mask_P):
+            case (None, None):
+                pass
+            case (Path() as p, None):
+                mask_T = hp.read_map(p)
+                mask_P = mask_T
+            case (None, Path() as p):
+                mask_P = hp.read_map(p)
+                mask_T = mask_P
+            case (Path() as pT, Path() as pP):
+                mask_T = hp.read_map(pT)
+                mask_P = hp.read_map(pP)
+            case _:
+                raise ValueError(
+                    "path_mask_T and path_mask_P must be None or Path objects."
+                )
+        if mask_T is not None and mask_P is not None:
+            if hp.get_nside(mask_T) != self.nside:
+                logger.warning("Converting temperature mask to nside=%d", self.nside)
+                mask_T = hp.ud_grade(mask_T, nside_out=self.nside, power=0)
+            if hp.get_nside(mask_P) != self.nside:
+                logger.warning("Converting polarization mask to nside=%d", self.nside)
+                mask_P = hp.ud_grade(mask_P, nside_out=self.nside, power=0)
+        self.mask_T = mask_T
+        self.mask_P = mask_P
 
 
 # -----------------------------------------------------------------------------
@@ -286,6 +351,25 @@ def invert_hit_matrix(matrix, thr=1.0e-3):
     return output, nbad
 
 
+def apply_mask_hit_matrix(inverse_hit, mask_T, mask_P, pixels):
+    """Apply temperature and polarization masks to the inverse hit matrix."""
+    _, _, skip, _ = count_pixels(pixels)
+    if mask_T is not None:
+        mask_T_chunk = mask_T[pixels[0] : pixels[1] + 1 : skip]
+
+        if mask_P is not None:
+            mask_P_chunk = mask_P[pixels[0] : pixels[1] + 1 : skip]
+        else:
+            mask_P_chunk = mask_T_chunk
+
+        for k in range(3):
+            inverse_hit[:, 0, k] *= mask_T_chunk
+            inverse_hit[:, 1, k] *= mask_P_chunk
+            inverse_hit[:, 2, k] *= mask_P_chunk
+
+    return inverse_hit
+
+
 def make_hit_vectors(
     detectors,
     weights,
@@ -294,12 +378,14 @@ def make_hit_vectors(
     smax,
     h_maps_dir,
     pixels,
+    mask_T,
+    mask_P,
     thr,
 ):
     """Build hit vectors and their inverse-weighted versions."""
     n_detectors = len(weights)
     n_pixels_per_chunk, _nhigh, _skip, _sample = count_pixels(pixels)
-
+    assert np.all(weights > 0), "All weights must be positive."
     hit = np.zeros(n_pixels_per_chunk, dtype=np.float64)
     hit_spin = np.zeros((n_pixels_per_chunk, 3), dtype=np.complex128)
     hit_vectors = np.zeros(
@@ -318,15 +404,17 @@ def make_hit_vectors(
         hit_spin[:, 1] += rho1_weight[idx_det] * hit_vectors[idx_det, 2]  # Q+iU
         hit_spin[:, 2] += rho2_weight[idx_det] * hit_vectors[idx_det, 4]  # Q-iU
 
-    hit = np.maximum(hit, 1.0)  # put 1 in empty pixels
+    valid = hit > 0.0 # select pixels with non-zero hit counts
     for comp in [0, 1, 2]:
-        hit_spin[:, comp] /= hit
+        np.divide(hit_spin[:, comp], hit, out=hit_spin[:, comp], where=valid)
     inverse_hit, nbad = invert_hit_matrix(hit_spin, thr=thr)
     del hit_spin
 
+    inverse_hit = apply_mask_hit_matrix(inverse_hit, mask_T, mask_P, pixels)
+
     for idx_det in range(n_detectors):
         for spin in range(smax + 1):
-            hit_vectors[idx_det, spin] /= hit
+            np.divide(hit_vectors[idx_det, spin], hit, out=hit_vectors[idx_det, spin], where=valid)
     del hit
 
     filtered_hit_vectors = np.zeros(
@@ -358,19 +446,21 @@ def make_hit_vectors(
                     if spin >= 4
                     else np.conjugate(hit_vectors[idx_det, abs(spin - 4), first:last])
                 )
-
+                #  \tilde\omega_s[0]
                 filtered_hit_vectors[idx_det, spin, 0, first:last] = inverse_hit[
                     first:last, 0, 0
                 ] * h_spin_0 + rho_hit[idx_det] * (
                     inverse_hit[first:last, 0, 1] * h_spin_p2
                     + inverse_hit[first:last, 0, 2] * h_spin_m2
                 )
+                #  \rho\tilde\omega_s[2]
                 filtered_hit_vectors[idx_det, spin, 1, first:last] = inverse_hit[
                     first:last, 1, 0
                 ] * h_spin_m2 + rho_hit[idx_det] * (
                     inverse_hit[first:last, 1, 1] * h_spin_0
                     + inverse_hit[first:last, 1, 2] * h_spin_m4
                 )
+                #  \rho\tilde\omega_s[-2]
                 filtered_hit_vectors[idx_det, spin, 2, first:last] = inverse_hit[
                     first:last, 2, 0
                 ] * h_spin_p2 + rho_hit[idx_det] * (
@@ -422,6 +512,9 @@ def make_hit_matrix(
     nbad_2 = 0
     pixel_start_chunk = 0
 
+    set_1.load_masks()
+    set_2.load_masks()
+
     for idx_chunk in range(number_of_chunks):
         pixel_start_chunk += n_pixel_per_chunk
         pixels = [
@@ -429,6 +522,7 @@ def make_hit_matrix(
             (idx_chunk + 1) * n_pixel_per_chunk - 1,
             skip,
         ]
+
         hit_vectors_1, nbad_chunk_1 = make_hit_vectors(
             set_1.detectors,
             weights_1,
@@ -437,7 +531,9 @@ def make_hit_matrix(
             smax,
             set_1.h_maps_dir,
             pixels,
-            thr,
+            mask_T=set_1.mask_T,
+            mask_P=set_1.mask_P,
+            thr=thr,
         )
         nbad_1 += nbad_chunk_1
         if same_set:
@@ -452,7 +548,9 @@ def make_hit_matrix(
                 smax,
                 set_2.h_maps_dir,
                 pixels,
-                thr,
+                mask_T=set_2.mask_T,
+                mask_P=set_2.mask_P,
+                thr=thr,
             )
             nbad_2 += nbad_chunk_2
 
@@ -604,7 +702,6 @@ def hmap2mat(
     set_2=None,
     *,
     smax=6,
-    nside=None,
     lmax=None,
     mmax=None,
     pixel_undersampling=None,
@@ -624,9 +721,6 @@ def hmap2mat(
         between the two sets is returned.
     smax : int
         Maximum spin in the hit/moment expansion (default 6).
-    nside : int or None
-        HEALPix resolution; if ``None`` it is inferred from ``set_1``'s h-maps
-        and checked against ``set_2``.
     lmax : int or None
         Maximum multipole; defaults to ``2 * nside``.
     mmax : int or None
@@ -655,20 +749,14 @@ def hmap2mat(
     names_1 = [detector.name for detector in set_1.detectors]
     names_2 = [detector.name for detector in set_2.detectors]
 
-    if nside is None:
-        nside = infer_nside(set_1.h_maps_dir, names_1[0])
+    if set_2 is not set_1:
+        assert set_2.nside == set_1.nside, "set_2 nside must match set_1 nside"
+
+    nside = set_1.nside
     if lmax is None:
         lmax = 2 * nside
     if mmax is None:
         mmax = smax + 2
-
-    if set_2 is not set_1:
-        nside_2 = infer_nside(set_2.h_maps_dir, names_2[0])
-        if nside_2 != nside:
-            raise ValueError(
-                f"set_2 h-maps nside ({nside_2}) does not match set_1 nside "
-                f"({nside}); a cross hit matrix requires a common resolution."
-            )
 
     thr = 3.0e-3
     ctypes = ["TT", "TE", "EE", "BB", "TB", "EB"]

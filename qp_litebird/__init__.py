@@ -17,6 +17,9 @@ Public API:
 - ``BeamMatrixResult`` -> container returned by ``hmap2mat``
 """
 
+import logging
+import os
+
 from .hmap2mat import BeamMatrixResult, DetectorSet, hmap2mat
 from .spectra import get_mixed_spectrum, get_spectra
 
@@ -27,3 +30,17 @@ __all__ = [
     "get_spectra",
     "hmap2mat",
 ]
+
+
+_pkg = logging.getLogger("qp_litebird")
+
+if not logging.getLogger().handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    root = logging.getLogger()
+    root.addHandler(handler)
+
+
+_pkg.setLevel(os.environ.get("qp_litebird_LOGLEVEL", "INFO").upper())
