@@ -34,13 +34,13 @@ __all__ = [
 
 _pkg = logging.getLogger("qp_litebird")
 
-if not logging.getLogger().handlers:
+# Give qp_litebird its own stderr output if the user doesn't setup logging.
+if not _pkg.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
-    root = logging.getLogger()
-    root.addHandler(handler)
+    _pkg.addHandler(handler)
 
-
+_pkg.propagate = False
 _pkg.setLevel(os.environ.get("qp_litebird_LOGLEVEL", "INFO").upper())
