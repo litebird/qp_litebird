@@ -1,16 +1,17 @@
 """
 QuickPol driver for LiteBIRD beam-mixing matrices.
 
-This module adapts the QuickPol beam-matrix algorithm (originally from the
-Planck NPIPE pipeline, see E. Hivon, S. Mottet and N. Ponthieu, "QuickPol",
+This module adapts the QuickPol beam-matrix algorithm (originally from
+E. Hivon, S. Mottet and N. Ponthieu, "QuickPol",
 A&A 598, A25 (2017)) to LiteBIRD inputs:
 
   * h-maps are read with ``litebird_sim.mapmaking.h_maps.load_h_maps_from_file``
-    (HDF5, one file per detector). LiteBIRD h-maps are already normalized by the
-    number of hits (``h_{0,0} = N_p`` and ``h_{s,0} = (1/N_p) sum exp(i s psi)``),
-    so the reader un-normalizes them (``h_{s,0} * N_p``) to recover the raw spin
-    moments that the QuickPol hit-matrix core expects. This keeps the core
-    computation unchanged.
+    (HDF5, one file per detector). LiteBIRD h-maps are normalized by the number
+    of hits and have the detector polarization angle factored out
+    (``h_{s,0} = (1/N_p) sum exp(i s (phi))``). The reader multiplies by
+    ``N_p exp(+i s psi) `` to recover the raw spin moments that the
+    QuickPol hit-matrix core expects. This keeps the core computation unchanged
+    and makes the input convention identical to that used in litebird_sim h-maps.
   * beams are ``litebird_sim.SphericalHarmonics`` objects converted to the
     ``(lmax + 1, mmax + 1, 3)`` layout consumed by ``build_beam_matrix``.
   * detector metadata (polarization angle, cross-polar efficiency) comes from
@@ -271,12 +272,18 @@ def count_pixels(pixels):
     return nlow, nhigh, skip, sample
 
 
-def load_spin_moments(h_maps_dir, detector_name, nside, smax, pixels):
-    """Load the hit count and un-normalized spin moments of one detector.
+def load_spin_moments(
+    h_maps_dir, detector_name, nside, smax, pixels, pol_angle_rad
+):
+    """Load the hit count and raw spin moments of one detector.
 
-    The LiteBIRD h-map ``h_{s,0}`` is divided by the number of hits
-    ``N_p``. QuickPol uses ``sum exp(i s psi)``, so we
-    multiply back by ``N_p``
+    LiteBIRD h-maps store the spin moments divided by the hit count
+    ``N_p`` with the detector polarization angle factored out::
+
+        h_{s,0} = (1 / N_p) sum_t exp(i s (phi_t)).
+
+    QuickPol works with the raw moments ``sum_t exp(i s (phi_t + psi))``, so we
+    multiply back by ``N_p exp(+i s psi)``.
     """
     path = os.path.join(h_maps_dir, f"h_maps_det_{detector_name}.h5")
     result = load_h_maps_from_file(path)
@@ -298,6 +305,7 @@ def load_spin_moments(h_maps_dir, detector_name, nside, smax, pixels):
         else:
             h_map = h_maps[(spin, 0)]
             buffer = (h_map.real + 1j * h_map.imag) * hit
+            buffer = buffer * np.exp(1j * spin * pol_angle_rad)
         buffer = buffer[pixels[0] : pixels[1] + 1]
         spin_moments[spin] = buffer[::skip] if sample else buffer
     return spin_moments
@@ -397,7 +405,12 @@ def make_hit_vectors(
 
     for idx_det, detector in enumerate(detectors):
         hit_vectors[idx_det] = load_spin_moments(
-            h_maps_dir, detector.name, nside, smax, pixels
+            h_maps_dir,
+            detector.name,
+            nside,
+            smax,
+            pixels,
+            pol_angle_rad=detector.pol_angle_rad,
         )
         hit += weights[idx_det] * hit_vectors[idx_det, 0].real
         hit_spin[:, 0] += rho2_weight[idx_det] * hit_vectors[idx_det, 0]  # T
