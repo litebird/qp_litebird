@@ -12,12 +12,14 @@ power spectra from a beam matrix and true power spectra.
 
 
 ## Install
-
+Clone this repo and install the package and its dependencies using `uv`:
 ```bash
-uv sync                      # package + runtime deps
+uv add /path/to/repo
+```
+If you want to run the example notebook, from this repo root directory, run:
+```bash
 uv sync --group notebooks    # + smarties for the notebook example
 ```
-
 ## Usage
 
 ```python
